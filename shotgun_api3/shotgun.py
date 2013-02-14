@@ -119,6 +119,10 @@ class ServerCapabilities(object):
             self.is_dev = False
 
         self.version = tuple(self.version[:3])
+
+        if self.version or self.version >= (5, 0, 0):
+            self.s3_storage_enabled = meta.get('s3_storage_enabled', False)
+
         self._ensure_json_supported()
 
 
@@ -1046,6 +1050,113 @@ class Shotgun(object):
 
         :returns: Id of the new attachment.
         """
+
+        is_thumbnail = (field_name == "thumb_image" or field_name == "filmstrip_thumb_image")
+        is_s3_upload = getattr(self.server_caps, 's3_storage_enabled', False)
+
+        if is_thumbnail or not is_s3_upload:
+            self._server_upload(entity_type, entity_id, path, field_name, display_name, tag_list)
+        else: 
+            self._s3_upload(entity_type, entity_id, path, field_name, display_name, tag_list)
+
+    def _s3_upload(self, entity_type, entity_id, path, field_name=None,
+        display_name=None, tag_list=None):
+        """Upload a file as an attachment/thumbnail to the specified
+        entity_type and entity_id.
+
+        :param entity_type: Required, entity type (string) to revive.
+
+        :param entity_id: Required, id of the entity to revive.
+
+        :param path: path to file on disk
+
+        :param field_name: the field on the entity to upload to
+            (ignored if thumbnail)
+
+        :param display_name: the display name to use for the file in the ui
+            (ignored if thumbnail)
+
+        :param tag_list: comma-separated string of tags to assign to the file
+
+        :returns: Id of the new attachment.
+        """
+        
+        path = os.path.abspath(os.path.expanduser(path or ""))
+        if not os.path.isfile(path):
+            raise ShotgunError("Path must be a valid file, got '%s'" % path)
+
+        filename = os.path.basename(path)
+        policy_params = {
+            'filename': os.path.basename(path),
+            'upload_type': 'Attachment'
+        }
+
+        policy_data = self._call_rpc("s3_upload_policy", policy_params)
+        if not policy_data:
+            raise ShotgunError("Policy Failed")
+
+        opener = self._build_opener(FormPostHandler)
+
+        upload_params = {
+            'key': policy_data.get('file_path'),
+            'AWSAccessKeyId': policy_data.get('AWSAccessKeyId'),
+            'acl': 'private',
+            'policy': policy_data.get('policy'),
+            'signature': policy_data.get('signature'),
+            'x-amz-server-side-encryption': 'AES256',
+            'file': open(path, "rb")
+        }
+        url = policy_data.get('host')
+
+        try:
+            result = opener.open(url, upload_params).read()
+        except Exception, e:
+            print e
+            if e.code == 500:
+                raise ShotgunError("Server encountered an internal error. "
+                    "\n%s\n(%s)\n%s\n\n" % (url, upload_params, e))
+            else:
+                raise ShotgunError("Unanticipated error occurred uploading "
+                    "%s: %s" % (path, e))
+        
+        entity = self.find_one(entity_type, [['id', 'is', entity_id]], ['project'])
+        attachment_data = {
+            'attachment_type': 's3_uploaded_file',
+            'filename': filename,
+            'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(policy_data.get('timestamp'))),
+            'attachment_links': [{'type': entity_type, 'id':entity_id}],
+            'project': entity.get('project')
+        }
+        if display_name:
+            params["display_name"] = display_name
+        if tag_list:
+            params["tag_list"] = tag_list
+
+        resp = self.create('Attachment', attachment_data, ["this_file", "content_type", "filename"])
+
+        return resp.get('id')
+
+    def _server_upload(self, entity_type, entity_id, path, field_name=None,
+        display_name=None, tag_list=None):
+        """Upload a file as an attachment/thumbnail to the specified
+        entity_type and entity_id.
+
+        :param entity_type: Required, entity type (string) to revive.
+
+        :param entity_id: Required, id of the entity to revive.
+
+        :param path: path to file on disk
+
+        :param field_name: the field on the entity to upload to
+            (ignored if thumbnail)
+
+        :param display_name: the display name to use for the file in the ui
+            (ignored if thumbnail)
+
+        :param tag_list: comma-separated string of tags to assign to the file
+
+        :returns: Id of the new attachment.
+        """
         path = os.path.abspath(os.path.expanduser(path or ""))
         if not os.path.isfile(path):
             raise ShotgunError("Path must be a valid file, got '%s'" % path)
@@ -1181,8 +1292,6 @@ class Shotgun(object):
             self.config.user_login = None
             self.config.user_password = None
             raise
-
-
 
 
     def _get_session_token(self):
