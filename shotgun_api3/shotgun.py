@@ -1120,12 +1120,17 @@ class Shotgun(object):
                     "%s: %s" % (path, e))
         
         entity = self.find_one(entity_type, [['id', 'is', entity_id]], ['project'])
+        content_type = mimetypes.guess_type(filename)[0]
+        content_type = content_type or 'application/octet-stream'
+        file_size = os.fstat(upload_params.get('file').fileno())[stat.ST_SIZE]
         attachment_data = {
             'attachment_type': 's3_uploaded_file',
             'filename': filename,
             'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(policy_data.get('timestamp'))),
             'attachment_links': [{'type': entity_type, 'id':entity_id}],
-            'project': entity.get('project')
+            'project': entity.get('project'),
+            'content_type': content_type,
+            'file_size': file_size
         }
         if display_name:
             params["display_name"] = display_name
