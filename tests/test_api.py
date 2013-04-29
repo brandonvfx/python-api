@@ -115,7 +115,6 @@ class TestShotgunApi(base.LiveTestBase):
         rv = self.sg.revive("Version", version["id"])
         self.assertEqual(False, rv)
 
-
     def test_last_accessed(self):
         page = self.sg.find('Page', [], fields=['last_accessed'], limit=1)
         self.assertEqual("Page", page[0]['type'])
@@ -126,7 +125,6 @@ class TestShotgunApi(base.LiveTestBase):
         #TODO test results
         rv = self.sg._get_session_token()
         self.assertTrue(rv)
-
 
     def test_upload_download(self):
         """Upload and download an attachment """
@@ -154,13 +152,6 @@ class TestShotgunApi(base.LiveTestBase):
 
     def test_upload_thumbnail_in_create(self):
         """Upload a thumbnail via the create method"""
-        # upload / download only works against a live server because it does
-        # not use the standard http interface
-        if 'localhost' in self.server_url:
-            print "upload via create tests skipped for localhost"
-            return
-        # end if
-
         this_dir, _ = os.path.split(__file__)
         path = os.path.abspath(os.path.expanduser(
             os.path.join(this_dir,"sg_logo.jpg")))
@@ -176,7 +167,10 @@ class TestShotgunApi(base.LiveTestBase):
         self.assertEqual(new_version.get('type'), 'Version')
         self.assertEqual(new_version.get('project'), self.project)
         self.assertTrue(new_version.get('image') is not None)
-        self.assertTrue( re.match("http:\/\/%s\/files\/0000\/0000\/\d{4}/232/sg_logo.jpg.jpg" % (self.server_address), new_version.get('image')) )
+        if self.sg.server_caps.version and self.sg.server_caps.version >= (5, 0, 0):
+            self.assertTrue( re.match("http:\/\/%s\/files_api\/0000\/0000\/\d{4}/sg_logo_t.jpg" % (self.server_address), new_version.get('image')) )
+        else:
+            self.assertTrue( re.match("http:\/\/%s\/files\/0000\/0000\/\d{4}\/232\/sg_logo.jpg.jpg" % (self.server_address), new_version.get('image')) )
         self.sg.delete("Version", new_version['id'])
 
         # test filmstrip image upload
@@ -189,18 +183,15 @@ class TestShotgunApi(base.LiveTestBase):
         self.assertEqual(new_version.get('type'), 'Version')
         self.assertEqual(new_version.get('project'), self.project)
         self.assertTrue(new_version.get('filmstrip_image') is not None)
-        self.assertTrue( re.match("http:\/\/%s\/files\/0000\/0000\/\d{4}/sg_logo.jpg" % (self.server_address), new_version.get('filmstrip_image')) )
+        if self.sg.server_caps.version and self.sg.server_caps.version >= (5, 0, 0):
+            self.assertTrue( re.match("http:\/\/%s\/files_api\/0000\/0000\/\d{4}/sg_logo.jpg" % (self.server_address), new_version.get('filmstrip_image')) )
+        else:
+            self.assertTrue( re.match("http:\/\/%s\/files\/0000\/0000\/\d{4}/sg_logo.jpg" % (self.server_address), new_version.get('filmstrip_image')) )
         self.sg.delete("Version", new_version['id'])
     # end test_upload_thumbnail_in_create
 
-    def test_upload_thumbnail(self):
-        # simple upload thumbnail test.
-        # upload / download only works against a live server because it does
-        # not use the standard http interface
-        if 'localhost' in self.server_url:
-            print "upload / down tests skipped for localhost"
-            return
-
+    def test_upload_thumbnail_for_version(self):
+        """simple upload thumbnail for version test."""
         this_dir, _ = os.path.split(__file__)
         path = os.path.abspath(os.path.expanduser(
             os.path.join(this_dir,"sg_logo.jpg")))
@@ -215,11 +206,19 @@ class TestShotgunApi(base.LiveTestBase):
         version_with_thumbnail = self.sg.find_one('Version',
             [['id', 'is', self.version['id']]],
             fields=['image'])
-        expected_version_with_thumbnail = {
-            'image': 'http://%s/files/0000/0000/%04d/232/sg_logo.jpg.jpg' % (self.server_address, thumb_id),
-            'type': 'Version',
-            'id': self.version['id']
-        }
+
+        if self.sg.server_caps.version and self.sg.server_caps.version >= (5, 0, 0):
+            expected_version_with_thumbnail = {
+                'image': 'http://%s/files_api/0000/0000/%04d/sg_logo_t.jpg' % (self.server_address, thumb_id),
+                'type': 'Version',
+                'id': self.version['id']
+            }
+        else:
+            expected_version_with_thumbnail = {
+                'image': 'http://%s/files/0000/0000/%04d/232/sg_logo.jpg.jpg' % (self.server_address, thumb_id),
+                'type': 'Version',
+                'id': self.version['id']
+            }
         self.assertEqual(expected_version_with_thumbnail, version_with_thumbnail)
 
         # clear thumbnail
@@ -228,16 +227,47 @@ class TestShotgunApi(base.LiveTestBase):
         expected_clear_thumbnail = {'id': self.version['id'], 'image': None, 'type': 'Version'}
         self.assertEqual(expected_clear_thumbnail, response_clear_thumbnail)
 
-    def test_linked_thumbnail_url(self):
-        #upload / download only works against a live server because it does
-        #not use the standard http interface
-        if 'localhost' in self.server_url:
-            print "upload / down tests skipped for localhost"
-            return
-
+    def test_upload_thumbnail_for_task(self):
+        """simple upload thumbnail for task test."""
         this_dir, _ = os.path.split(__file__)
         path = os.path.abspath(os.path.expanduser(
             os.path.join(this_dir,"sg_logo.jpg")))
+        size = os.stat(path).st_size
+
+        # upload thumbnail
+        thumb_id = self.sg.upload_thumbnail("Task",
+            self.task['id'], path)
+        self.assertTrue(isinstance(thumb_id, int))
+
+        # check result on version
+        task_with_thumbnail = self.sg.find_one('Task',
+            [['id', 'is', self.task['id']]],
+            fields=['image'])
+
+        if self.sg.server_caps.version and self.sg.server_caps.version >= (5, 0, 0):
+            expected_task_with_thumbnail = {
+                'image': 'http://%s/files_api/0000/0000/%04d/sg_logo_t.jpg' % (self.server_address, thumb_id),
+                'type': 'Task',
+                'id': self.task['id']
+            }
+        else:
+            expected_task_with_thumbnail = {
+                'image': 'http://%s/files/0000/0000/%04d/232/sg_logo.jpg.jpg' % (self.server_address, thumb_id),
+                'type': 'Task',
+                'id': self.task['id']
+            }
+        self.assertEqual(expected_task_with_thumbnail, task_with_thumbnail)
+
+        # clear thumbnail
+        response_clear_thumbnail = self.sg.update("Version",
+            self.version['id'], {'image': None})
+        expected_clear_thumbnail = {'id': self.version['id'], 'image': None, 'type': 'Version'}
+        self.assertEqual(expected_clear_thumbnail, response_clear_thumbnail)
+
+    def test_linked_thumbnail_url(self):
+        this_dir, _ = os.path.split(__file__)
+        path = os.path.abspath(os.path.expanduser(
+            os.path.join(this_dir, "sg_logo.jpg")))
 
         thumb_id = self.sg.upload_thumbnail("Project",
             self.version['project']['id'], path)
@@ -248,7 +278,17 @@ class TestShotgunApi(base.LiveTestBase):
             fields=['id', 'code', 'project.Project.image']
         )
 
-        if self.sg.server_caps.version and self.sg.server_caps.version >= (3, 3, 0):
+        if self.sg.server_caps.version and self.sg.server_caps.version >= (5, 0, 0):
+            print "5.0.0"
+            expected_version_with_project = [
+                {
+                    'code': 'Sg unittest version',
+                    'type': 'Version',
+                    'id': self.version['id'],
+                    'project.Project.image': 'http://%s/files_api/0000/0000/%04d/sg_logo_t.jpg' % (self.server_address, thumb_id)
+                }
+            ]
+        elif self.sg.server_caps.version and self.sg.server_caps.version >= (3, 3, 0):
             expected_version_with_project = [
                 {
                     'code': 'Sg unittest version',
@@ -270,12 +310,6 @@ class TestShotgunApi(base.LiveTestBase):
 
     def test_share_thumbnail(self):
         """share thumbnail between two entities"""
-        # upload / download only works against a live server because it does
-        # not use the standard http interface
-        if 'localhost' in self.server_url:
-            print "upload / down tests skipped for localhost"
-            return
-
         this_dir, _ = os.path.split(__file__)
         path = os.path.abspath(os.path.expanduser(
             os.path.join(this_dir,"sg_logo.jpg")))
