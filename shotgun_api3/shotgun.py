@@ -120,8 +120,8 @@ class ServerCapabilities(object):
 
         self.version = tuple(self.version[:3])
 
-        if self.version or self.version >= (5, 0, 0):
-            self.s3_storage_enabled = meta.get('s3_storage_enabled', False)
+        if self.version and self.version >= (5, 0, 0):
+            self.s3_uploads_enabled = meta.get('s3_uploads_enabled', False)
 
         self._ensure_json_supported()
 
@@ -1057,13 +1057,11 @@ class Shotgun(object):
         :returns: Id of the new attachment.
         """
 
-        is_thumbnail = (field_name == "thumb_image" or field_name == "filmstrip_thumb_image")
-        is_s3_upload = getattr(self.server_caps, 's3_storage_enabled', False)
-
-        if is_thumbnail or not is_s3_upload:
-            self._server_upload(entity_type, entity_id, path, field_name, display_name, tag_list)
+        is_s3_upload = getattr(self.server_caps, 's3_uploads_enabled', False)
+        if not is_s3_upload:
+            return self._server_upload(entity_type, entity_id, path, field_name, display_name, tag_list)
         else: 
-            self._s3_upload(entity_type, entity_id, path, field_name, display_name, tag_list)
+            return self._s3_upload(entity_type, entity_id, path, field_name, display_name, tag_list)
 
     def _s3_upload(self, entity_type, entity_id, path, field_name=None,
         display_name=None, tag_list=None):
@@ -1084,18 +1082,28 @@ class Shotgun(object):
 
         :param tag_list: comma-separated string of tags to assign to the file
 
-        :returns: Id of the new attachment.
+        :returns: Id of the new attachment or thumbnail.
         """
         
         path = os.path.abspath(os.path.expanduser(path or ""))
         if not os.path.isfile(path):
             raise ShotgunError("Path must be a valid file, got '%s'" % path)
 
+        is_thumbnail = (field_name == 'thumb_image' or field_name == 'filmstrip_thumb_image')
+
         filename = os.path.basename(path)
+        content_type = mimetypes.guess_type(filename)[0]
+        content_type = content_type or 'application/octet-stream'
+
         policy_params = {
             'filename': os.path.basename(path),
-            'upload_type': 'Attachment'
+            'content_type': content_type
         }
+
+        if not is_thumbnail:
+            policy_params['upload_type'] = 'Attachment'
+        else:
+            policy_params['upload_type'] = 'Thumbnail'
 
         policy_data = self._call_rpc("s3_upload_policy", policy_params)
         if not policy_data:
@@ -1103,49 +1111,55 @@ class Shotgun(object):
 
         opener = self._build_opener(FormPostHandler)
 
-        upload_params = {
-            'key': policy_data.get('file_path'),
-            'AWSAccessKeyId': policy_data.get('AWSAccessKeyId'),
-            'acl': 'private',
-            'policy': policy_data.get('policy'),
-            'signature': policy_data.get('signature'),
-            'x-amz-server-side-encryption': 'AES256',
-            'file': open(path, "rb")
-        }
-        url = policy_data.get('host')
+        params = policy_data.get('form_fields')
+        if not params:
+            raise ShotgunError('Upload Policy returned without the required form files')
+
+        params['file'] = open(path, "rb")
+        params['Content-Type'] = content_type
+
+        url = policy_data.get('url')
+        if not url:
+            raise ShotgunError('Upload Policy returned without upload url')
 
         try:
-            result = opener.open(url, upload_params).read()
-        except Exception, e:
-            print e
-            if e.code == 500:
+            result = opener.open(url, params).read()
+        except Exception, exp:
+            if getattr(exp, 'code', None) == 500:
                 raise ShotgunError("Server encountered an internal error. "
-                    "\n%s\n(%s)\n%s\n\n" % (url, upload_params, e))
+                    "\n%s\n(%s)\n%s\n\n" % (url, upload_params, exp))
             else:
                 raise ShotgunError("Unanticipated error occurred uploading "
-                    "%s: %s" % (path, e))
-        
-        entity = self.find_one(entity_type, [['id', 'is', entity_id]], ['project'])
-        content_type = mimetypes.guess_type(filename)[0]
-        content_type = content_type or 'application/octet-stream'
-        file_size = os.fstat(upload_params.get('file').fileno())[stat.ST_SIZE]
-        attachment_data = {
-            'attachment_type': 's3_uploaded_file',
-            'filename': filename,
-            'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(policy_data.get('timestamp'))),
-            'attachment_links': [{'type': entity_type, 'id':entity_id}],
-            'project': entity.get('project'),
-            'content_type': content_type,
-            'file_size': file_size
+                    "%s: %s" % (path, exp))
+
+
+        upload_entity_type = 'Attachment'
+        if is_thumbnail:
+            upload_entity_type = 'Thumbnail'
+
+        params = {
+            'type': entity_type,
+            'id': entity_id,
+            'field_name': field_name,
+            'upload_entity_type': upload_entity_type,
+            'display_name': display_name,
+            'tag_list': tag_list,
+            'upload_entity_data': {
+                'filename': filename,
+                'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(policy_data.get('timestamp'))),
+                'content_type': content_type,
+                'file_size': os.fstat(params.get('file').fileno())[stat.ST_SIZE]
+            }
         }
-        if display_name:
-            params["display_name"] = display_name
-        if tag_list:
-            params["tag_list"] = tag_list
+        
+        if field_name == 'filmstrip_thumb_image':
+            params['filmstrip'] = True
 
-        resp = self.create('Attachment', attachment_data, ["this_file", "content_type", "filename"])
-
-        return resp.get('id')
+        data = self._call_rpc('s3_create_upload_entity', params)
+        if data['status']:
+            return data['id']
+        else:
+            raise ShotgunError(data['message'])
 
     def _server_upload(self, entity_type, entity_id, path, field_name=None,
         display_name=None, tag_list=None):
